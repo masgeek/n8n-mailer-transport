@@ -1,0 +1,46 @@
+{
+  "name": "masgeek/n8n-mailer-transport",
+  "description": "A Symfony Mailer & Laravel transport driver for routing outgoing emails directly to an n8n webhook.",
+  "type": "library",
+  "license": "MIT",
+  "authors": [
+    {
+      "name": "masgeek"
+    }
+  ],
+  "autoload": {
+    "psr-4": {
+      "Masgeek\\N8nMailer\\": "src/"
+    }
+  },
+  "autoload-dev": {
+    "psr-4": {
+      "Masgeek\\N8nMailer\\Tests\\": "tests/"
+    }
+  },
+  "extra": {
+    "laravel": {
+      "providers": [
+        "Masgeek\\N8nMailer\\Laravel\\N8nMailerServiceProvider"
+      ]
+    }
+  },
+  "require": {
+    "php": "^8.4",
+    "symfony/http-client": "^7.0|^8.0",
+    "symfony/mailer": "^7.0|^8.0"
+  },
+  "require-dev": {
+    "phpunit/phpunit": "^13.3",
+    "phpstan/phpstan": "^2.2",
+    "friendsofphp/php-cs-fixer": "^3.95",
+    "illuminate/mail": "^13.32",
+    "orchestra/testbench": "^11.2"
+  },
+  "scripts": {
+    "test": "phpunit",
+    "analyze": "phpstan analyse",
+    "lint": "php-cs-fixer fix --dry-run --diff",
+    "fix": "php-cs-fixer fix"
+  }
+}
