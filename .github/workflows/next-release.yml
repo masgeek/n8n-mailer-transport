@@ -1,6 +1,5 @@
 name: Create next release
 on:
-  merge_group:
   workflow_run:
     workflows:
       - UnitTests
