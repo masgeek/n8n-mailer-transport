@@ -2,11 +2,15 @@
 
 namespace Masgeek\N8nMailer;
 
+use Illuminate\Support\Arr;
 use Masgeek\N8nMailer\Exception\N8nTransportException;
 use Symfony\Component\Mailer\SentMessage;
 use Symfony\Component\Mailer\Transport\AbstractTransport;
 use Symfony\Component\Mime\Address;
+use Symfony\Component\Mime\Email;
+use Symfony\Component\Mime\Header\Headers;
 use Symfony\Component\Mime\MessageConverter;
+use Symfony\Component\Mime\Part\DataPart;
 use Symfony\Contracts\HttpClient\HttpClientInterface;
 
 class N8nTransport extends AbstractTransport
@@ -15,24 +19,57 @@ class N8nTransport extends AbstractTransport
     private HttpClientInterface $client;
     /** @var array{type: string, username?: string, password?: string, header?: string, token?: string} */
     private array $auth;
+    private int $maxRetries;
+    private int $retryDelay;
+    /** @var callable(string, Email): string */
+    private $webhookUrlResolver;
+    /** @var PayloadMapper|null */
+    private $payloadMapper;
+    /** @var ResponseHandler|null */
+    private $responseHandler;
+    /** @var list<PayloadMiddleware> */
+    private array $middleware = [];
 
     /**
-     * @param array{type?: string, username?: string, password?: string, header?: string, token?: string} $auth
+     * @param array{type: string, username?: string, password?: string, header?: string, token?: string} $auth
+     * @param array{max_retries?: int, retry_delay?: int, url_resolver?: callable(string, Email): string, payload_mapper?: PayloadMapper, response_handler?: ResponseHandler, middleware?: list<PayloadMiddleware>} $options
      */
     public function __construct(
-        string $webhookUrl,
+        string              $webhookUrl,
         HttpClientInterface $client,
-        array $auth = ['type' => 'none']
-    ) {
+        array               $auth = ['type' => 'none'],
+        array               $options = [],
+    )
+    {
         parent::__construct();
         $this->webhookUrl = $this->validateUrl($webhookUrl);
         $this->client = $client;
         $this->auth = $this->validateAuth($auth);
+        $this->maxRetries = $options['max_retries'] ?? 0;
+        $this->retryDelay = $options['retry_delay'] ?? 1000;
+        $this->webhookUrlResolver = $options['url_resolver'] ?? null;
+        $this->payloadMapper = $options['payload_mapper'] ?? null;
+        $this->responseHandler = $options['response_handler'] ?? null;
+        $this->middleware = $options['middleware'] ?? [];
+    }
+
+    /**
+     * @param array{type: string, username?: string, password?: string, header?: string, token?: string} $auth
+     * @param array{max_retries?: int, retry_delay?: int, url_resolver?: callable(string, Email): string, payload_mapper?: PayloadMapper, response_handler?: ResponseHandler, middleware?: list<PayloadMiddleware>} $options
+     */
+    public static function create(string $webhookUrl, HttpClientInterface $client, array $auth = ['type' => 'none'], array $options = []): self
+    {
+        return new self($webhookUrl, $client, $auth, $options);
     }
 
     protected function doSend(SentMessage $message): void
     {
-        $email = MessageConverter::toEmail($message->getOriginalMessage());
+        $originalMessage = $message->getOriginalMessage();
+        if (!$originalMessage instanceof \Symfony\Component\Mime\Message) {
+            throw new \RuntimeException('Expected a Symfony Mime Message instance.');
+        }
+        $email = MessageConverter::toEmail($originalMessage);
+        $envelope = $message->getEnvelope();
 
         $payload = [
             'subject' => $email->getSubject(),
@@ -47,24 +84,89 @@ class N8nTransport extends AbstractTransport
             'attachments' => $this->formatAttachments($email->getAttachments()),
         ];
 
+        if ($this->payloadMapper !== null) {
+            $payload = ($this->payloadMapper)($payload, $email, $envelope);
+        }
+
+        foreach ($this->middleware as $mw) {
+            $payload = $mw->handle($payload, $email, $envelope);
+        }
+
+        $webhookUrl = $this->resolveWebhookUrl($envelope, $email);
+
         $options = ['json' => $payload];
         $authHeaders = $this->buildAuthHeaders();
         if ($authHeaders !== []) {
             $options['headers'] = $authHeaders;
         }
 
-        $response = $this->client->request('POST', $this->webhookUrl, $options);
+        $response = $this->sendWithRetry($webhookUrl, $options);
 
-        $statusCode = $response->getStatusCode();
-        if ($statusCode >= 400) {
-            $body = $response->getContent(false);
-            throw N8nTransportException::requestFailed($this->webhookUrl, $statusCode, $body);
+        if ($this->responseHandler !== null) {
+            ($this->responseHandler)(
+                [
+                    'status_code' => $response['status_code'],
+                    'body' => $response['body'],
+                ],
+                $email,
+                $envelope
+            );
         }
     }
 
+
     public function __toString(): string
     {
-        return sprintf('n8n+%s', $this->webhookUrl);
+        return $this->webhookUrl;
+    }
+
+    /**
+     * @param array<string, mixed> $options
+     * @return array{status_code: int, body: string}
+     */
+    private function sendWithRetry(string $url, array $options): array
+    {
+        $lastException = null;
+        $attempts = $this->maxRetries + 1;
+
+        for ($i = 0; $i < $attempts; $i++) {
+            try {
+                $response = $this->client->request('POST', $url, $options);
+                $statusCode = $response->getStatusCode();
+                $body = $response->getContent(false);
+
+                if ($statusCode < 400) {
+                    return ['status_code' => $statusCode, 'body' => $body];
+                }
+
+                if ($statusCode < 500 || $i === $attempts - 1) {
+                    throw N8nTransportException::requestFailed($url, $statusCode, $body);
+                }
+
+                $lastException = N8nTransportException::requestFailed($url, $statusCode, $body);
+            } catch (\Symfony\Contracts\HttpClient\Exception\TransportExceptionInterface $e) {
+                if ($i === $attempts - 1) {
+                    throw N8nTransportException::requestFailed($url, 0, $e->getMessage());
+                }
+                $lastException = N8nTransportException::requestFailed($url, 0, $e->getMessage());
+            }
+
+            if ($i < $attempts - 1) {
+                usleep($this->retryDelay * 1000);
+            }
+        }
+
+        throw $lastException;
+    }
+
+    private function resolveWebhookUrl(\Symfony\Component\Mailer\Envelope $envelope, Email $email): string
+    {
+        if ($this->webhookUrlResolver !== null) {
+            $resolved = ($this->webhookUrlResolver)($this->webhookUrl, $email);
+            return $this->validateUrl($resolved);
+        }
+
+        return $this->webhookUrl;
     }
 
     /**
@@ -75,8 +177,8 @@ class N8nTransport extends AbstractTransport
         return match ($this->auth['type']) {
             'basic' => [
                 'Authorization' => 'Basic ' . base64_encode(
-                    ($this->auth['username'] ?? '') . ':' . ($this->auth['password'] ?? '')
-                ),
+                        ($this->auth['username'] ?? '') . ':' . ($this->auth['password'] ?? '')
+                    ),
             ],
             'header' => [
                 $this->auth['header'] => $this->auth['token'] ?? '',
@@ -155,7 +257,10 @@ class N8nTransport extends AbstractTransport
         );
     }
 
-    private function formatHeaders($headers): array
+    /**
+     * @return array<string, string>
+     */
+    private function formatHeaders(Headers $headers): array
     {
         $result = [];
         foreach ($headers->all() as $name => $value) {
@@ -165,7 +270,7 @@ class N8nTransport extends AbstractTransport
     }
 
     /**
-     * @param \Symfony\Component\Mime\Attachment[] $attachments
+     * @param DataPart[] $attachments
      * @return array<int, array{filename: string, contentType: string, body: string}>
      */
     private function formatAttachments(array $attachments): array
@@ -174,7 +279,7 @@ class N8nTransport extends AbstractTransport
         foreach ($attachments as $attachment) {
             $result[] = [
                 'filename' => $attachment->getFilename(),
-                'contentType' => $attachment->getMediaType() . '/' . $attachment->getSubtype(),
+                'contentType' => $attachment->getMediaType() . '/' . $attachment->getMediaSubtype(),
                 'body' => base64_encode($attachment->getBody()),
             ];
         }
