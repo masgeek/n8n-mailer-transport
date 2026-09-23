@@ -10,88 +10,99 @@ use Symfony\Contracts\HttpClient\HttpClientInterface;
 
 class N8nTransportFactory extends AbstractTransportFactory
 {
-    private HttpClientInterface $httpClient;
-
-    public function __construct(HttpClientInterface $httpClient)
-    {
+    public function __construct(
+        private readonly HttpClientInterface $httpClient,
+    ) {
         parent::__construct();
-        $this->httpClient = $httpClient;
     }
 
     public function create(Dsn $dsn): TransportInterface
     {
         $scheme = $dsn->getScheme();
 
-        if ('https' !== $scheme && 'http' !== $scheme) {
+        if (!in_array($scheme, $this->getSupportedSchemes(), true)) {
             throw new UnsupportedSchemeException($dsn, 'n8n', $this->getSupportedSchemes());
         }
 
-        $host = $dsn->getHost();
-        $port = $dsn->getPort();
+        $url = sprintf('%s://%s', $scheme, $dsn->getHost());
 
-        $url = sprintf('%s://%s', $scheme, $host);
-        if ($port !== null && $port !== 80 && $port !== 443) {
+        $port = $dsn->getPort();
+        if ($port !== null && $port !== ('https' === $scheme ? 443 : 80)) {
             $url .= sprintf(':%d', $port);
         }
 
-        $auth = $this->parseAuthFromDsn($dsn);
-
-        return new N8nTransport($url, $this->httpClient, $auth);
+        return new N8nTransport($url, $this->httpClient, $this->parseAuth($dsn));
     }
 
     public function createFromString(string $dsn): TransportInterface
     {
         $parsed = parse_url($dsn);
+
         if ($parsed === false || !isset($parsed['scheme'], $parsed['host'])) {
-            throw new \InvalidArgumentException(sprintf('Invalid DSN: %s', $dsn));
+            throw new \InvalidArgumentException(sprintf('Invalid DSN "%s".', $dsn));
         }
 
         $scheme = $parsed['scheme'];
-        if ('https' !== $scheme && 'http' !== $scheme) {
-            throw new \InvalidArgumentException(sprintf('Unsupported scheme "%s". Use https or http.', $scheme));
+        if (!in_array($scheme, $this->getSupportedSchemes(), true)) {
+            throw new \InvalidArgumentException(sprintf('Unsupported scheme "%s". Expected: %s.', $scheme, implode(', ', $this->getSupportedSchemes())));
         }
 
-        $host = $parsed['host'];
-        $port = $parsed['port'] ?? null;
-        $path = $parsed['path'] ?? '';
-        $user = isset($parsed['user']) ? rawurldecode($parsed['user']) : null;
-        $password = isset($parsed['pass']) ? rawurldecode($parsed['pass']) : null;
-
-        $url = sprintf('%s://%s', $scheme, $host);
-        if ($port !== null && $port !== 80 && $port !== 443) {
-            $url .= sprintf(':%d', $port);
+        // Build the full URL preserving path, query, fragment
+        $url = $scheme . '://' . $parsed['host'];
+        if (isset($parsed['port'])) {
+            $defaultPort = 'https' === $scheme ? 443 : 80;
+            if ($parsed['port'] !== $defaultPort) {
+                $url .= ':' . $parsed['port'];
+            }
         }
-        $url .= $path;
+        if (isset($parsed['path'])) {
+            $url .= $parsed['path'];
+        }
+        if (isset($parsed['query'])) {
+            $url .= '?' . $parsed['query'];
+        }
+        if (isset($parsed['fragment'])) {
+            $url .= '#' . $parsed['fragment'];
+        }
 
-        $auth = $this->parseAuthFromCredentials($user, $password);
+        // Parse auth from userinfo
+        $auth = ['type' => 'none'];
+        if (isset($parsed['user'])) {
+            $user = $parsed['user'];
+            $pass = $parsed['pass'] ?? null;
+
+            if ($pass !== null) {
+                $auth = ['type' => 'basic', 'username' => $user, 'password' => $pass];
+            } else {
+                $auth = ['type' => 'bearer', 'token' => $user];
+            }
+        }
 
         return new N8nTransport($url, $this->httpClient, $auth);
     }
 
+    /**
+     * @return list<string>
+     */
     protected function getSupportedSchemes(): array
     {
         return ['https', 'http'];
     }
 
     /**
-     * @return array{type: string, username?: string, password?: string, header?: string, token?: string}
+     * @return array{type: string, username?: string, password?: string, token?: string}
      */
-    private function parseAuthFromDsn(Dsn $dsn): array
+    private function parseAuth(Dsn $dsn): array
     {
-        return $this->parseAuthFromCredentials($dsn->getUser(), $dsn->getPassword());
-    }
+        $user = $dsn->getUser();
+        $password = $dsn->getPassword();
 
-    /**
-     * @return array{type: string, username?: string, password?: string, header?: string, token?: string}
-     */
-    private function parseAuthFromCredentials(?string $user, ?string $password): array
-    {
         if ($user !== null && $password !== null) {
             return ['type' => 'basic', 'username' => $user, 'password' => $password];
         }
 
         if ($user !== null) {
-            return ['type' => 'jwt', 'token' => $user];
+            return ['type' => 'bearer', 'token' => $user];
         }
 
         return ['type' => 'none'];
