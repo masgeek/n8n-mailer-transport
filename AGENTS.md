@@ -5,9 +5,9 @@ Symfony Mailer transport that POSTs emails as JSON to an n8n webhook URL.
 ## What this is
 
 A minimal PHP library (`masgeek/n8n-mailer-transport`) providing:
-- `N8nTransport` — Symfony Mailer transport (`n8n+https://` DSN scheme)
+- `N8nTransport` — Symfony Mailer transport (`https://` DSN scheme)
 - `N8nTransportFactory` — factory for Symfony's transport auto-discovery
-- `N8nMailerServiceProvider` — Laravel integration (registers `n8n` mail driver)
+- `N8nMailerServiceProvider` — Laravel integration (registers `n8n-mailer` mail driver)
 
 ## Install
 
@@ -25,24 +25,23 @@ Requires PHP 8.4+, Symfony HttpClient + Mailer (7.x or 8.x).
 $mailer = new Mailer(new N8nTransport('https://your-n8n.example.com/webhook/email-id'));
 ```
 
-Or via DSN: `n8n+https://your-n8n.example.com/webhook/email-id`
+Or via DSN: `https://your-n8n.example.com/webhook/email-id`
 
 ### Laravel
 
 Register in `config/mail.php`:
 ```php
 'mailers' => [
-    'n8n' => [
-        'transport' => 'n8n',
-        'url' => env('N8N_WEBHOOK_URL'),
+    'n8n-mailer' => [
+        'transport' => 'n8n-mailer',
     ],
 ],
 ```
 
 Add to `config/services.php`:
 ```php
-'n8n' => [
-    'url' => env('N8N_WEBHOOK_URL'),
+'n8n-mailer' => [
+    'url' => env('N8N_MAILER_URL'),
     'timeout' => 30,
 ],
 ```
@@ -51,33 +50,19 @@ Service provider auto-discovered via Composer `extra.laravel.providers`.
 
 ## Authentication
 
-Supports `none`, `basic`, `header`, and `jwt` auth.
+Supports `none`, `basic`, `header`, and `bearer` auth.
 
 ### Laravel (`config/services.php`)
 
 ```php
-'n8n' => [
-    'url' => env('N8N_WEBHOOK_URL'),
+'n8n-mailer' => [
+    'url' => env('N8N_MAILER_URL'),
     'auth' => [
         'type' => 'basic',
-        'username' => env('N8N_WEBHOOK_USER'),
-        'password' => env('N8N_WEBHOOK_PASS'),
+        'username' => env('N8N_MAILER_USER'),
+        'password' => env('N8N_MAILER_PASS'),
     ],
 ],
-```
-
-### Symfony DSN
-
-```php
-// Basic auth (user:pass in URL)
-$mailer = new Mailer(N8nTransportFactory::create(
-    Dsn::fromString('n8n+https://user:pass@your-n8n.example.com/webhook/id')
-));
-
-// JWT/Bearer token (token as user in URL)
-$mailer = new Mailer(N8nTransportFactory::create(
-    Dsn::fromString('n8n+https://your-token@your-n8n.example.com/webhook/id')
-));
 ```
 
 ### Auth types
@@ -87,7 +72,15 @@ $mailer = new Mailer(N8nTransportFactory::create(
 | `none` | _(none)_ | No auth headers |
 | `basic` | `username`, `password` | `Authorization: Basic base64(user:pass)` |
 | `header` | `header`, `token` | Custom header (e.g. `X-API-Key: xxx`) |
-| `jwt` | `token` | `Authorization: Bearer <token>` |
+| `bearer` | `token` | `Authorization: Bearer <token>` |
+
+## Features
+
+- **Retry**: `max_retries` + `retry_delay` for 5xx/network errors
+- **Payload mapper**: `PayloadMapper` callback to transform payload
+- **Middleware**: `PayloadMiddleware` interface for chaining transforms
+- **Response handler**: `ResponseHandler` callback to process n8n response
+- **Dynamic URL**: `url_resolver` callback to resolve webhook URL per email
 
 ## Payload structure
 
@@ -98,12 +91,21 @@ POST body sent to webhook (JSON):
   "from": [{"email": "...", "name": "..."}],
   "to": [{"email": "...", "name": "..."}],
   "cc": [...],
+  "cc_count": 0,
   "bcc": [...],
+  "bcc_count": 0,
   "replyTo": [...],
+  "sender": null,
+  "return_path": null,
   "text": "...",
+  "text_charset": "utf-8",
   "html": "...",
-  "headers": {"key": "value"},
-  "attachments": [{"filename": "...", "contentType": "...", "body": "..."}]
+  "html_charset": "utf-8",
+  "date": "2026-09-23T12:00:00+00:00",
+  "priority": 3,
+  "has_attachments": false,
+  "attachments": [{"filename": "...", "contentType": "...", "body": "..."}],
+  "headers": {"key": "value"}
 }
 ```
 
@@ -113,6 +115,9 @@ POST body sent to webhook (JSON):
 src/
   N8nTransport.php          — transport implementation
   N8nTransportFactory.php   — Symfony factory
+  PayloadMiddleware.php     — middleware interface
+  PayloadMapper.php         — payload transformation
+  ResponseHandler.php       — response processing
   Exception/
     N8nTransportException.php — custom exceptions
   Laravel/
