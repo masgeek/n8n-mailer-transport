@@ -2,7 +2,7 @@
 
 namespace Masgeek\N8nMailer;
 
-use Illuminate\Support\Arr;
+use InvalidArgumentException;
 use Masgeek\N8nMailer\Exception\N8nTransportException;
 use Symfony\Component\Mailer\SentMessage;
 use Symfony\Component\Mailer\Transport\AbstractTransport;
@@ -11,6 +11,10 @@ use Symfony\Component\Mime\Email;
 use Symfony\Component\Mime\Header\Headers;
 use Symfony\Component\Mime\MessageConverter;
 use Symfony\Component\Mime\Part\DataPart;
+use Symfony\Contracts\HttpClient\Exception\ClientExceptionInterface;
+use Symfony\Contracts\HttpClient\Exception\RedirectionExceptionInterface;
+use Symfony\Contracts\HttpClient\Exception\ServerExceptionInterface;
+use Symfony\Contracts\HttpClient\Exception\TransportExceptionInterface;
 use Symfony\Contracts\HttpClient\HttpClientInterface;
 
 class N8nTransport extends AbstractTransport
@@ -39,8 +43,7 @@ class N8nTransport extends AbstractTransport
         HttpClientInterface $client,
         array               $auth = ['type' => 'none'],
         array               $options = [],
-    )
-    {
+    ) {
         parent::__construct();
         $this->webhookUrl = $this->validateUrl($webhookUrl);
         $this->client = $client;
@@ -62,6 +65,13 @@ class N8nTransport extends AbstractTransport
         return new self($webhookUrl, $client, $auth, $options);
     }
 
+    /**
+     * @param SentMessage $message
+     * @return void
+     * @throws ClientExceptionInterface
+     * @throws RedirectionExceptionInterface
+     * @throws ServerExceptionInterface
+     */
     protected function doSend(SentMessage $message): void
     {
         $originalMessage = $message->getOriginalMessage();
@@ -71,17 +81,33 @@ class N8nTransport extends AbstractTransport
         $email = MessageConverter::toEmail($originalMessage);
         $envelope = $message->getEnvelope();
 
+        $from = $email->getFrom();
+        $to = $email->getTo();
+        $replyTo = $email->getReplyTo();
+        $cc = $email->getCc();
+        $bcc = $email->getBcc();
+        $attachments = $email->getAttachments();
+
         $payload = [
             'subject' => $email->getSubject(),
-            'from' => $this->formatAddresses($email->getFrom()),
-            'to' => $this->formatAddresses($email->getTo()),
-            'cc' => $this->formatAddresses($email->getCc()),
-            'bcc' => $this->formatAddresses($email->getBcc()),
-            'replyTo' => $this->formatAddresses($email->getReplyTo()),
+            'from' => $this->formatAddresses($from),
+            'to' => $this->formatAddresses($to),
+            'cc' => $this->formatAddresses($cc),
+            'cc_count' => count($cc),
+            'bcc' => $this->formatAddresses($bcc),
+            'bcc_count' => count($bcc),
+            'replyTo' => $this->formatAddresses($replyTo),
+            'sender' => $email->getSender() ? $this->formatAddresses([$email->getSender()])[0] : null,
+            'return_path' => $email->getReturnPath()?->getAddress() ?? null,
             'text' => $email->getTextBody(),
+            'text_charset' => $email->getTextCharset(),
             'html' => $email->getHtmlBody(),
+            'html_charset' => $email->getHtmlCharset(),
+            'date' => $email->getDate()?->format('c') ?? null,
+            'priority' => $email->getPriority(),
+            'has_attachments' => count($attachments) > 0,
+            'attachments' => $this->formatAttachments($attachments),
             'headers' => $this->formatHeaders($email->getHeaders()),
-            'attachments' => $this->formatAttachments($email->getAttachments()),
         ];
 
         if ($this->payloadMapper !== null) {
@@ -121,8 +147,12 @@ class N8nTransport extends AbstractTransport
     }
 
     /**
+     * @param string $url
      * @param array<string, mixed> $options
      * @return array{status_code: int, body: string}
+     * @throws ClientExceptionInterface
+     * @throws RedirectionExceptionInterface
+     * @throws ServerExceptionInterface
      */
     private function sendWithRetry(string $url, array $options): array
     {
@@ -144,7 +174,7 @@ class N8nTransport extends AbstractTransport
                 }
 
                 $lastException = N8nTransportException::requestFailed($url, $statusCode, $body);
-            } catch (\Symfony\Contracts\HttpClient\Exception\TransportExceptionInterface $e) {
+            } catch (TransportExceptionInterface $e) {
                 if ($i === $attempts - 1) {
                     throw N8nTransportException::requestFailed($url, 0, $e->getMessage());
                 }
@@ -177,13 +207,13 @@ class N8nTransport extends AbstractTransport
         return match ($this->auth['type']) {
             'basic' => [
                 'Authorization' => 'Basic ' . base64_encode(
-                        ($this->auth['username'] ?? '') . ':' . ($this->auth['password'] ?? '')
-                    ),
+                    ($this->auth['username'] ?? '') . ':' . ($this->auth['password'] ?? '')
+                ),
             ],
             'header' => [
                 $this->auth['header'] => $this->auth['token'] ?? '',
             ],
-            'jwt' => [
+            'bearer' => [
                 'Authorization' => 'Bearer ' . ($this->auth['token'] ?? ''),
             ],
             default => [],
@@ -217,30 +247,30 @@ class N8nTransport extends AbstractTransport
     {
         $type = $auth['type'] ?? 'none';
 
-        if (!in_array($type, ['none', 'basic', 'header', 'jwt'], true)) {
+        if (!in_array($type, ['none', 'basic', 'header', 'bearer'], true)) {
             throw new \InvalidArgumentException(
-                sprintf('Invalid auth type "%s". Expected: none, basic, header, or jwt.', $type)
+                sprintf('Invalid auth type "%s". Expected: none, basic, header, or bearer.', $type)
             );
         }
 
         if ($type === 'basic' && empty($auth['username'])) {
-            throw new \InvalidArgumentException('Basic auth requires a "username".');
+            throw new InvalidArgumentException('Basic auth requires a "username".');
         }
 
         if ($type === 'header' && (empty($auth['header']) || empty($auth['token']))) {
-            throw new \InvalidArgumentException('Header auth requires "header" and "token".');
+            throw new InvalidArgumentException('Header auth requires "header" and "token".');
         }
 
-        if ($type === 'jwt' && empty($auth['token'])) {
-            throw new \InvalidArgumentException('JWT auth requires a "token".');
+        if ($type === 'bearer' && empty($auth['token'])) {
+            throw new InvalidArgumentException('Bearer auth requires a "token".');
         }
 
         return $auth;
     }
 
     /**
-     * @param Address[] $addresses
-     * @return array<int, array{email: string, name: string}>
+     * @param list<Address|null> $addresses
+     * @return list<array{email: string, name: string}>
      */
     private function formatAddresses(?array $addresses): array
     {
@@ -253,7 +283,7 @@ class N8nTransport extends AbstractTransport
                 'email' => $addr->getAddress(),
                 'name' => $addr->getName(),
             ],
-            $addresses
+            array_values(array_filter($addresses))
         );
     }
 
