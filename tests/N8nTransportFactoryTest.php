@@ -47,7 +47,7 @@ it('creates transport with basic auth from dsn', function () {
     expect($transport)->toBeInstanceOf(N8nTransport::class);
 });
 
-it('creates transport with jwt auth from dsn', function () {
+it('creates transport with bearer auth from dsn', function () {
     $transport = $this->factory->createFromString('https://my-token@n8n.example.com/webhook/test');
 
     expect($transport)->toBeInstanceOf(N8nTransport::class);

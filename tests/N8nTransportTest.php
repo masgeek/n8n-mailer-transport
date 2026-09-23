@@ -2,9 +2,6 @@
 
 use Masgeek\N8nMailer\Exception\N8nTransportException;
 use Masgeek\N8nMailer\N8nTransport;
-use Symfony\Component\Mailer\Envelope;
-use Symfony\Component\Mime\Address;
-use Symfony\Component\Mime\Email;
 use Symfony\Contracts\HttpClient\HttpClientInterface;
 use Symfony\Contracts\HttpClient\ResponseInterface;
 
@@ -40,7 +37,7 @@ it('does not send auth headers when type is none', function () {
 
     $this->client->expects($this->once())
         ->method('request')
-        ->with('POST', WEBHOOK_URL, $this->callback(fn ($options) => !isset($options['headers'])))
+        ->with('POST', WEBHOOK_URL, $this->callback(fn($options) => !isset($options['headers'])))
         ->willReturn($response);
 
     $transport = new N8nTransport(WEBHOOK_URL, $this->client);
@@ -64,7 +61,7 @@ it('sends basic auth authorization header', function () {
     $transport->send(makeEmail(), makeEnvelope());
 });
 
-it('sends jwt auth bearer header', function () {
+it('sends bearer auth header', function () {
     $response = $this->createMock(ResponseInterface::class);
     $response->method('getStatusCode')->willReturn(200);
 
@@ -76,7 +73,7 @@ it('sends jwt auth bearer header', function () {
         }))
         ->willReturn($response);
 
-    $auth = ['type' => 'jwt', 'token' => 'my-jwt-token'];
+    $auth = ['type' => 'bearer', 'token' => 'my-jwt-token'];
     $transport = new N8nTransport(WEBHOOK_URL, $this->client, $auth);
     $transport->send(makeEmail(), makeEnvelope());
 });
@@ -110,9 +107,9 @@ it('throws exception for header auth without header', function () {
     new N8nTransport(WEBHOOK_URL, $this->client, ['type' => 'header', 'token' => 'key']);
 })->throws(\InvalidArgumentException::class, 'Header auth requires "header" and "token"');
 
-it('throws exception for jwt auth without token', function () {
-    new N8nTransport(WEBHOOK_URL, $this->client, ['type' => 'jwt']);
-})->throws(\InvalidArgumentException::class, 'JWT auth requires a "token"');
+it('throws exception for bearer auth without token', function () {
+    new N8nTransport(WEBHOOK_URL, $this->client, ['type' => 'bearer']);
+})->throws(\InvalidArgumentException::class, 'Bearer auth requires a "token"');
 
 it('throws exception on 4xx response', function () {
     $response = $this->createMock(ResponseInterface::class);
