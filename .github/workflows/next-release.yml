@@ -1,9 +1,12 @@
-name: NextRelease
+name: Create next release
 on:
-  merge_group:
-  push:
+  workflow_run:
+    workflows:
+      - UnitTests
+    types:
+      - completed
     branches:
-      - 'develop'
+      - develop
 jobs:
   next-release-pr:
     runs-on: ubuntu-24.04
