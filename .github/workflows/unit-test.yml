@@ -48,4 +48,4 @@ jobs:
         run: composer install --no-interaction --no-progress --prefer-dist
 
       - name: Run tests
-        run: vendor/bin/phpunit --no-coverage
+        run: vendor/bin/pest --no-coverage
